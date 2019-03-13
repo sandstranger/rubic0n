@@ -257,5 +257,9 @@ LUALIB_API int luaopen_math(lua_State *L)
 #if LJ_HASFFI
   math_init_geometry(L);
 #endif
+#if defined(LUA_COMPAT_MOD) && !LJ_52
+  lua_getfield(L, -1, "fmod");
+  lua_setfield(L, -2, "mod");
+#endif  
   return 1;
 }
