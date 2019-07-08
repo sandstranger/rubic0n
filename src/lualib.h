@@ -23,6 +23,8 @@
 #define LUA_FFILIBNAME	"ffi"
 #define LUA_THRLIBNAME	"thread"
 
+LUALIB_API void lj_allow_escape_sequences(int allowed);
+
 LUALIB_API int luaopen_base(lua_State *L);
 LUALIB_API int luaopen_math(lua_State *L);
 LUALIB_API int luaopen_string(lua_State *L);
