@@ -915,7 +915,7 @@ static void asm_href(ASMState *as, IRIns *ir, IROp merge)
       emit_lso(as, A64I_LDRw, dest, tab, offsetof(GCtab, hmask));
     } else if (irt_isstr(kt)) {
       emit_dnm(as, A64I_ANDw, dest, dest, tmp);
-      emit_lso(as, A64I_LDRw, tmp, key, offsetof(GCstr, sid));
+      emit_lso(as, A64I_LDRw, tmp, key, offsetof(GCstr, hash));
       emit_lso(as, A64I_LDRw, dest, tab, offsetof(GCtab, hmask));
     } else {  /* Must match with hash*() in lj_tab.c. */
       emit_dnm(as, A64I_ANDw, dest, dest, tmp);
