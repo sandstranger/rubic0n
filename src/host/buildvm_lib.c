@@ -386,11 +386,11 @@ void emit_lib(BuildCtx *ctx)
 	    buf[len-2] = 0;
 	  }
 	}
-	if (!strcmp(buf, "#if LJ_52"))
+	if (!strcmp(buf, "#if LJ_52") || !strcmp(buf, "#if LJ_52\r\n"))
 	  ok = LJ_52;
-	else if (!strcmp(buf, "#if LJ_HASJIT"))
+	else if (!strcmp(buf, "#if LJ_HASJIT") || !strcmp(buf, "#if LJ_HASJIT\r\n"))
 	  ok = LJ_HASJIT;
-	else if (!strcmp(buf, "#if LJ_HASFFI"))
+	else if (!strcmp(buf, "#if LJ_HASFFI") || !strcmp(buf, "#if LJ_HASFFI\r\n"))
 	  ok = LJ_HASFFI;
 	else if (!strcmp(buf, "#if LJ_HASBUFFER"))
 	  ok = LJ_HASBUFFER;
