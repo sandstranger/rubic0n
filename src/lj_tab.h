@@ -31,6 +31,25 @@ static LJ_AINLINE uint32_t hashrot(uint32_t lo, uint32_t hi)
   return hi;
 }
 
+/* Hash values are masked with the table hash mask and used as an index. */
+static LJ_AINLINE Node *hashmask(const GCtab *t, uint32_t hash)
+{
+  Node *n = noderef(t->node);
+  return &n[hash & t->hmask];
+}
+
+/* String IDs are generated when a string is interned. */
+#define hashstr(t, s) hashmask(t, (s)->hash)
+
+#define hashlohi(t, lo, hi)	hashmask((t), hashrot((lo), (hi)))
+#define hashnum(t, o)		hashlohi((t), (o)->u32.lo, ((o)->u32.hi << 1))
+#if LJ_GC64
+#define hashgcref(t, r) \
+  hashlohi((t), (uint32_t)gcrefu(r), (uint32_t)(gcrefu(r) >> 32))
+#else
+#define hashgcref(t, r)		hashlohi((t), gcrefu(r), gcrefu(r) + HASH_BIAS)
+#endif
+
 #define hsize2hbits(s)	((s) ? ((s)==1 ? 1 : 1+lj_fls((uint32_t)((s)-1))) : 0)
 
 LJ_FUNCA GCtab *lj_tab_new(lua_State *L, uint32_t asize, uint32_t hbits);
