@@ -111,6 +111,9 @@ local direct_finalizer_fields = {
   "finalizer_direct_cfunc_calls",
   "finalizer_direct_cfunc_nonzero_results",
   "finalizer_direct_cfunc_fallbacks",
+  "finalizer_direct_cfunc_batches",
+  "finalizer_direct_cfunc_batched_calls",
+  "finalizer_direct_cfunc_batch_max",
 }
 
 local nonresurrecting_finalizer_fields = {

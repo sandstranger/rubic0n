@@ -229,6 +229,7 @@ int main(void)
 {
   lua_State *T = luaL_newstate();
   double before_nores, after_nores, before_direct, after_direct;
+  double before_batches, after_batches;
   if (T == NULL)
     return 2;
   luaL_openlibs(T);
@@ -239,6 +240,7 @@ int main(void)
 
   before_nores = gcstat(T, "finalizer_nonresurrecting_cfunc_frees");
   before_direct = gcstat(T, "finalizer_direct_cfunc_calls");
+  before_batches = gcstat(T, "finalizer_direct_cfunc_batches");
   lua_newuserdata(T, 1);
   lua_newtable(T);
   lua_pushcfunction(T, leaf_finalizer);
@@ -251,6 +253,7 @@ int main(void)
 
   after_nores = gcstat(T, "finalizer_nonresurrecting_cfunc_frees");
   after_direct = gcstat(T, "finalizer_direct_cfunc_calls");
+  after_batches = gcstat(T, "finalizer_direct_cfunc_batches");
   lua_close(T);
 
   if (leaf_count != 1) {
@@ -264,6 +267,10 @@ int main(void)
   if (after_direct < before_direct + 1) {
     fprintf(stderr, "direct %.0f -> %.0f\n", before_direct, after_direct);
     return 5;
+  }
+  if (after_batches != before_batches) {
+    fprintf(stderr, "batches %.0f -> %.0f\n", before_batches, after_batches);
+    return 6;
   }
   puts("ok");
   return 0;

@@ -664,6 +664,9 @@ typedef struct GCStats {
   uint64_t finalizer_direct_cfunc_calls;
   uint64_t finalizer_direct_cfunc_nonzero_results;
   uint64_t finalizer_direct_cfunc_fallbacks;
+  uint64_t finalizer_direct_cfunc_batches;
+  uint64_t finalizer_direct_cfunc_batched_calls;
+  uint64_t finalizer_direct_cfunc_batch_max;
   uint64_t finalizer_nonresurrecting_cfunc_frees;
   uint64_t finalizer_nonresurrecting_cfunc_fallbacks;
   uint64_t weak_tables;

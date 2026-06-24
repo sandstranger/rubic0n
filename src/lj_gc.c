@@ -34,6 +34,18 @@
 #define GCSWEEPCOST	10
 #define GCFINALIZECOST	100
 
+#ifndef LUAJIT_BATCHED_FINALIZER_MAX
+#define LUAJIT_BATCHED_FINALIZER_MAX 64
+#elif LUAJIT_BATCHED_FINALIZER_MAX < 1
+#error "LUAJIT_BATCHED_FINALIZER_MAX must be >= 1"
+#endif
+
+typedef struct GCFinalizerLookup {
+  cTValue *mo;
+  int resolved;
+  int direct;
+} GCFinalizerLookup;
+
 /* Macros to set GCobj colors and flags. */
 #define white2gray(x)		((x)->gch.marked &= (uint8_t)~LJ_GC_WHITES)
 #define gray2black(x)		((x)->gch.marked |= LJ_GC_BLACK)
@@ -646,7 +658,7 @@ static GCfunc *gc_unprotected_c_finalizer_func(cTValue *mo, GCobj *o)
 }
 
 static int gc_unprotected_c_finalizer(global_State *g, lua_State *VL,
-				     cTValue *mo, GCobj *o)
+				     cTValue *mo, GCobj *o, int *nresp)
 {
   GCfunc *fn = gc_unprotected_c_finalizer_func(mo, o);
   TValue *oldbase, *oldtop, *top;
@@ -670,6 +682,8 @@ static int gc_unprotected_c_finalizer(global_State *g, lua_State *VL,
   VL->base = top;
   VL->top = top+1;
   nres = fn->c.f(VL);
+  if (nresp)
+    *nresp = nres;
   if (nres != 0)
     lj_gc_stats_inc(g, finalizer_direct_cfunc_nonzero_results);
   lj_gc_stats_inc(g, finalizer_direct_cfunc_calls);
@@ -692,7 +706,7 @@ static void gc_call_nonresurrecting_c_finalizer(global_State *g, lua_State *L,
   hook_entergc(g);
   if (LJ_HASPROFILE && (oldh & HOOK_PROFILE)) lj_dispatch_update(g, 0);
   g->gc.threshold = LJ_MAX_MEM;
-  ok = gc_unprotected_c_finalizer(g, VL, mo, o);
+  ok = gc_unprotected_c_finalizer(g, VL, mo, o, NULL);
   lj_assertG(ok, "bad non-resurrecting finalizer eligibility");
   UNUSED(ok);
   setgcref(g->cur_L, obj2gco(L));
@@ -701,9 +715,105 @@ static void gc_call_nonresurrecting_c_finalizer(global_State *g, lua_State *L,
   g->gc.threshold = oldt;
 }
 
+static void gc_resolve_direct_udata_finalizer(global_State *g, GCobj *o,
+					     GCFinalizerLookup *lookup)
+{
+  lookup->mo = NULL;
+  lookup->resolved = 0;
+  lookup->direct = 0;
+  if (o->gch.gct != ~LJ_TUDATA)
+    return;
+  lookup->resolved = 1;
+  lookup->mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);
+  lookup->direct = lookup->mo &&
+    gc_unprotected_c_finalizer_func(lookup->mo, o) != NULL;
+}
+
+static MSize gc_finalizer_batch_limit(GCSize lim)
+{
+  MSize cap = LUAJIT_BATCHED_FINALIZER_MAX;
+  GCSize budget_cap = lim / GCFINALIZECOST;
+  if (budget_cap == 0)
+    return 1;
+  if (budget_cap < cap)
+    cap = (MSize)budget_cap;
+  return cap;
+}
+
+static MSize gc_finalize_direct_cfunc_batch(lua_State *L, GCSize lim,
+					   GCFinalizerLookup *fallback,
+					   int *contract_violationp)
+{
+  global_State *g = G(L);
+  lua_State *VL = vmthread(g);
+  GCRef oldcur_L;
+  uint8_t oldh;
+  GCSize oldt, freed_bytes = 0;
+  MSize cap = gc_finalizer_batch_limit(lim);
+  MSize n = 0;
+  GCobj *o;
+  cTValue *mo;
+  GCFinalizerLookup lookup;
+
+  lj_assertG(g->gc.state == GCSfinalize,
+	     "batched finalizer outside finalizer phase");
+  *contract_violationp = 0;
+  o = gcnext(gcref(g->gc.mmudata));
+  gc_resolve_direct_udata_finalizer(g, o, &lookup);
+  if (!lookup.direct) {
+    *fallback = lookup;
+    return 0;
+  }
+  mo = lookup.mo;
+
+  /* May throw while the queue is still untouched. One frame is reused. */
+  lj_state_checkstack(VL, 1+LJ_FR2+LUA_MINSTACK);
+  oldcur_L = g->cur_L;
+  oldh = hook_save(g);
+  oldt = g->gc.threshold;
+  lj_trace_abort(g);
+  hook_entergc(g);
+  if (LJ_HASPROFILE && (oldh & HOOK_PROFILE)) lj_dispatch_update(g, 0);
+  g->gc.threshold = LJ_MAX_MEM;
+
+  do {
+    GCudata *ud = gco2ud(o);
+    GCSize sz = (GCSize)sizeudata(ud);
+    int ok;
+    int nres = 0;
+    lj_gc_stats_inc(g, finalizer_calls);
+    gc_count_finalizer_kind(g, mo);
+    gc_unqueuefinalizer(g, o);
+    ok = gc_unprotected_c_finalizer(g, VL, mo, o, &nres);
+    lj_assertG(ok, "bad batched finalizer eligibility");
+    UNUSED(ok);
+    freed_bytes += sz;
+    lj_udata_free(g, ud);
+    lj_gc_stats_inc(g, finalizer_nonresurrecting_cfunc_frees);
+    n++;
+    if (nres != 0)
+      *contract_violationp = 1;
+    if (n >= cap || *contract_violationp || gcref(g->gc.mmudata) == NULL)
+      break;
+    o = gcnext(gcref(g->gc.mmudata));
+    gc_resolve_direct_udata_finalizer(g, o, &lookup);
+    mo = lookup.direct ? lookup.mo : NULL;
+  } while (mo != NULL);
+
+  setgcrefr(g->cur_L, oldcur_L);
+  hook_restore(g, oldh);
+  if (LJ_HASPROFILE && (oldh & HOOK_PROFILE)) lj_dispatch_update(g, 0);
+  g->gc.threshold = oldt;
+  g->gc.estimate += freed_bytes;  /* Queued finalizable size was pre-subtracted. */
+  lj_gc_stats_inc(g, finalizer_direct_cfunc_batches);
+  lj_gc_stats_add(g, finalizer_direct_cfunc_batched_calls, n);
+  lj_gc_stats_max(g, finalizer_direct_cfunc_batch_max, n);
+  return n;
+}
+
 /* Call a userdata or cdata finalizer. */
 static void gc_call_finalizer(global_State *g, lua_State *L,
-			      cTValue *mo, GCobj *o)
+			      cTValue *mo, GCobj *o, int try_direct)
 {
   /* Save and restore lots of state around the __gc callback. */
   lua_State *VL = vmthread(g);
@@ -721,13 +831,13 @@ static void gc_call_finalizer(global_State *g, lua_State *L,
   hook_entergc(g);  /* Disable hooks and new traces during __gc. */
   if (LJ_HASPROFILE && (oldh & HOOK_PROFILE)) lj_dispatch_update(g, 0);
   g->gc.threshold = LJ_MAX_MEM;  /* Prevent GC steps. */
-  if (gc_unprotected_c_finalizer(g, VL, mo, o)) {
+  if (try_direct && gc_unprotected_c_finalizer(g, VL, mo, o, NULL)) {
     setgcref(g->cur_L, obj2gco(L));
     hook_restore(g, oldh);
     if (LJ_HASPROFILE && (oldh & HOOK_PROFILE)) lj_dispatch_update(g, 0);
     g->gc.threshold = oldt;  /* Restore GC threshold. */
     return;
-  } else if (tvisfunc(mo)) {
+  } else if (try_direct && tvisfunc(mo)) {
     GCfunc *fn = funcV(mo);
     if (iscfunc(fn) && fn->c.nupvalues == 0)
       lj_gc_stats_inc(g, finalizer_direct_cfunc_fallbacks);
@@ -754,16 +864,25 @@ static void gc_call_finalizer(global_State *g, lua_State *L,
 }
 
 /* Finalize one userdata or cdata object from the mmudata list. */
-static void gc_finalize(lua_State *L, int allow_nores)
+static void gc_finalize(lua_State *L, int allow_nores,
+			GCFinalizerLookup *lookup)
 {
   global_State *g = G(L);
   GCobj *o = gcnext(gcref(g->gc.mmudata));
-  cTValue *mo;
+  cTValue *mo = NULL;
+  int resolved = lookup && lookup->resolved && o->gch.gct == ~LJ_TUDATA;
   int nores_fallback = 0;
   lj_assertG(tvref(g->jit_base) == NULL, "finalizer called on trace");
   if (allow_nores && o->gch.gct == ~LJ_TUDATA) {
-    mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);
-    if (mo && gc_unprotected_c_finalizer_func(mo, o) != NULL) {
+    int direct;
+    if (resolved) {
+      mo = lookup->mo;
+      direct = lookup->direct;
+    } else {
+      mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);
+      direct = mo && gc_unprotected_c_finalizer_func(mo, o) != NULL;
+    }
+    if (direct) {
       GCudata *ud = gco2ud(o);
       GCSize sz = (GCSize)sizeudata(ud);
       /* May throw while the queued userdata is still linked and reachable. */
@@ -797,7 +916,7 @@ static void gc_finalize(lua_State *L, int allow_nores)
     if (!tvisnil(tv)) {
       copyTV(L, &tmp, tv);
       setnilV(tv);  /* Clear entry in finalizer table. */
-      gc_call_finalizer(g, L, &tmp, o);
+      gc_call_finalizer(g, L, &tmp, o, 1);
     }
     return;
   }
@@ -807,16 +926,17 @@ static void gc_finalize(lua_State *L, int allow_nores)
   setgcref(g->gc.root, o);
   makewhite(g, o);
   /* Resolve the __gc metamethod. */
-  mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);
+  if (!resolved)
+    mo = lj_meta_fastg(g, tabref(gco2ud(o)->metatable), MM_gc);
   if (mo)
-    gc_call_finalizer(g, L, mo, o);
+    gc_call_finalizer(g, L, mo, o, !resolved);
 }
 
 /* Finalize all userdata objects from mmudata list. */
 void lj_gc_finalize_udata(lua_State *L)
 {
   while (gcref(G(L)->gc.mmudata) != NULL)
-    gc_finalize(L, 0);  /* lua_close() drain: keep resurrection-capable path. */
+    gc_finalize(L, 0, NULL);  /* lua_close() drain: keep unbatched resurrection-capable path. */
 }
 
 #if LJ_HASFFI
@@ -836,7 +956,7 @@ void lj_gc_finalize_cdata(lua_State *L)
       o->gch.marked &= (uint8_t)~LJ_GC_CDATA_FIN;
       copyTV(L, &tmp, &node[i].val);
       setnilV(&node[i].val);
-      gc_call_finalizer(g, L, &tmp, o);
+      gc_call_finalizer(g, L, &tmp, o, 1);
     }
 }
 #endif
@@ -891,7 +1011,7 @@ static void atomic(global_State *g, lua_State *L)
 }
 
 /* GC state machine. Returns a cost estimate for each step performed. */
-static size_t gc_onestep(lua_State *L)
+static size_t gc_onestep(lua_State *L, GCSize lim)
 {
   global_State *g = G(L);
   switch (g->gc.state) {
@@ -957,14 +1077,24 @@ static size_t gc_onestep(lua_State *L)
   case GCSfinalize:
     if (gcref(g->gc.mmudata) != NULL) {
       GCSize old = g->gc.total;
+      MSize finalized;
+      GCSize cost;
+      GCFinalizerLookup lookup;
+      int contract_violation;
       if (tvref(g->jit_base))  /* Don't call finalizers on trace. */
 	return LJ_MAX_MEM;
-      gc_finalize(L, 1);  /* Normal GC queue after sweep/weak clearing. */
+      finalized = gc_finalize_direct_cfunc_batch(L, lim, &lookup,
+						  &contract_violation);
+      if (finalized == 0) {
+	gc_finalize(L, 1, &lookup);  /* Normal GC queue after sweep/weak clearing. */
+	finalized = 1;
+      }
+      cost = (GCSize)GCFINALIZECOST * finalized;
       if (old >= g->gc.total && g->gc.estimate > old - g->gc.total)
 	g->gc.estimate -= old - g->gc.total;
-      if (g->gc.estimate > GCFINALIZECOST)
-	g->gc.estimate -= GCFINALIZECOST;
-      return GCFINALIZECOST;
+      if (g->gc.estimate > cost)
+	g->gc.estimate -= cost;
+      return contract_violation ? LJ_MAX_MEM : cost;
     }
     g->gc.state = GCSpause;  /* End of GC cycle. */
     g->gc.debt = 0;
@@ -994,7 +1124,7 @@ int LJ_FASTCALL lj_gc_step(lua_State *L)
   if (g->gc.total > g->gc.threshold)
     g->gc.debt += g->gc.total - g->gc.threshold;
   do {
-    lim -= (GCSize)gc_onestep(L);
+    lim -= (GCSize)gc_onestep(L, lim);
     if (g->gc.state == GCSpause) {
       g->gc.threshold = (g->gc.estimate/100) * g->gc.pause;
       g->vmstate = ostate;
@@ -1058,12 +1188,12 @@ void lj_gc_fullgc(lua_State *L)
   while (
       g->gc.state == GCSsweepudata ||
       g->gc.state == GCSsweepstring || g->gc.state == GCSsweep)
-    gc_onestep(L);  /* Finish sweep. */
+    gc_onestep(L, LJ_MAX_MEM);  /* Finish sweep. */
   lj_assertG(g->gc.state == GCSfinalize || g->gc.state == GCSpause,
 	     "bad GC state");
   /* Now perform a full GC. */
   g->gc.state = GCSpause;
-  do { gc_onestep(L); } while (g->gc.state != GCSpause);
+  do { gc_onestep(L, LJ_MAX_MEM); } while (g->gc.state != GCSpause);
   g->gc.threshold = (g->gc.estimate/100) * g->gc.pause;
   g->vmstate = ostate;
 }

@@ -75,10 +75,15 @@ LJ_FUNC void lj_gc_stats_reset(global_State *g);
   ((g)->gc.stats.field++)
 #define lj_gc_stats_add(g, field, n) \
   ((g)->gc.stats.field += (uint64_t)(n))
+#define lj_gc_stats_max(g, field, n) \
+  ((g)->gc.stats.field < (uint64_t)(n) ? \
+   ((g)->gc.stats.field = (uint64_t)(n)) : (uint64_t)0)
 #else
 #define lj_gc_stats_inc(g, field) \
   ((void)0)
 #define lj_gc_stats_add(g, field, n) \
+  ((void)0)
+#define lj_gc_stats_max(g, field, n) \
   ((void)0)
 #endif
 

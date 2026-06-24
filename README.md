@@ -38,6 +38,7 @@ Table of Contents
         * [Static userdata finalizer scan contract](#static-userdata-finalizer-scan-contract)
         * [Direct zero-upvalue C finalizer ABI](#direct-zero-upvalue-c-finalizer-abi)
         * [Non-resurrecting direct-free C finalizer ABI](#non-resurrecting-direct-free-c-finalizer-abi)
+        * [Batched non-resurrecting direct C finalizers](#batched-non-resurrecting-direct-c-finalizers)
     * [Updated bytecode options](#updated-bytecode-options)
         * [New `-bL` option](#new--bl-option)
         * [Updated `-bl` option](#updated--bl-option)
@@ -234,7 +235,10 @@ as no-preserve cases. The detailed fields are
 `sweep_udata_preserve_callable_nongc`.
 
 Stats-enabled builds also expose `finalizer_direct_cfunc_*` counters for the
-mandatory direct zero-upvalue C finalizer ABI, plus
+mandatory direct zero-upvalue C finalizer ABI, including the batched-finalizer
+fields `finalizer_direct_cfunc_batches`,
+`finalizer_direct_cfunc_batched_calls`, and
+`finalizer_direct_cfunc_batch_max`, plus
 `finalizer_nonresurrecting_cfunc_frees` and
 `finalizer_nonresurrecting_cfunc_fallbacks` for the mandatory non-resurrecting
 direct-free ABI.
@@ -650,6 +654,51 @@ every zero-upvalue C userdata finalizer covered by the ABI. With
 `finalizer_nonresurrecting_cfunc_fallbacks`,
 `finalizer_direct_cfunc_nonzero_results`, and the finalizer dispatch counters on
 representative workloads before relying on this ABI in production.
+
+[Back to TOC](#table-of-contents)
+
+### Batched non-resurrecting direct C finalizers
+
+This Rubic0n/OpenMW-oriented branch batches eligible direct-free userdata
+finalizers during normal `GCSfinalize` processing by default. The compile-time
+`LUAJIT_BATCHED_FINALIZER_MAX` macro controls the internal batch cap; the default
+is 64 and values below 1 are rejected at compile time.
+
+Batching applies only to the same narrow objects covered by the direct and
+non-resurrecting C finalizer ABIs: full userdata whose `__gc` metamethod is a
+zero-upvalue C function satisfying the direct, leaf, non-throwing,
+non-yielding, non-reentrant, non-resurrecting contract. Lua finalizers, C
+closures with upvalues, cdata finalizers, fast functions, callable tables, and
+all generic protected fallback paths keep the normal finalizer behavior. The
+`lua_close()` userdata drain intentionally stays unbatched and uses the
+resurrection-capable path.
+
+The internal batch limit is the lower of `LUAJIT_BATCHED_FINALIZER_MAX` and the
+remaining incremental GC step budget expressed in `GCFINALIZECOST` units. If the
+remaining budget is already below one finalizer, the collector still finalizes one
+object to make progress. With the default cap, a 64-object internal batch is
+possible only when the current GC step budget can pay for 64 × `GCFINALIZECOST`.
+Batching reduces repeated dispatch and GC state setup overhead for audited native
+leaf destructors, but representative OpenMW frame behavior still needs to be
+measured separately from synthetic finalizer floods.
+
+Finalizer queue order is preserved, but interleaving changes: one incremental
+collector step may run more than one eligible native destructor before returning
+to Lua. The internal batch stops when it reaches the next ineligible finalizer;
+the surrounding GC step may then continue through the normal finalizer path if
+budget remains. A nonzero return count is still a contract violation; the batched
+path records it when stats are enabled and stops the current internal batch after
+that object rather than continuing through more queued userdata. For incremental
+GC, that violation also ends the current public GC step; an explicit full
+collection may continue through later internal steps.
+
+With `LUAJIT_ENABLE_GCSTATS`, the batched path exposes:
+
+* `finalizer_direct_cfunc_batches`: number of internal batched dispatches;
+* `finalizer_direct_cfunc_batched_calls`: userdata finalized through those
+  batches;
+* `finalizer_direct_cfunc_batch_max`: high-water maximum number of userdata
+  finalized by one internal batch since the last stats reset.
 
 [Back to TOC](#table-of-contents)
 
