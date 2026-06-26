@@ -904,7 +904,7 @@ static size_t gc_onestep(lua_State *L)
     GCSize old = g->gc.total;
     lj_gc_stats_inc(g, sweep_string_steps);
     gc_fullsweep(g, &g->strhash[g->gc.sweepstr++]);  /* Sweep one chain. */
-    if (g->gc.sweepstr > g->str.mask)
+    if (g->gc.sweepstr > g->strmask)    
       g->gc.state = GCSsweep;  /* All string hash chains sweeped. */
     lj_assertG(old >= g->gc.total, "sweep increased memory");
     g->gc.estimate -= old - g->gc.total;

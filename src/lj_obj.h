@@ -725,6 +725,7 @@ typedef struct global_State {
   TValue tmptv, tmptv2;	/* Temporary TValues. */
   Node nilnode;		/* Fallback 1-element hash part (nil key and value). */
   GCupval uvhead;	/* Head of double-linked list of all open upvalues. */
+  GCRef vmthref; /* Link to VM thread. */
   int32_t hookcount;	/* Instruction hook countdown. */
   int32_t hookcstart;	/* Start count for instruction hook counter. */
   lua_Hook hookf;	/* Hook function. */
