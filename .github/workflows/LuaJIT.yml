@@ -381,7 +381,7 @@ jobs:
     name: Build Android ARM64 (AArch64) shared library
     runs-on: ubuntu-latest
     env:
-      ANDROID_API_LEVEL: '21'
+      ANDROID_API_LEVEL: '26'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
@@ -389,7 +389,7 @@ jobs:
         id: setup_ndk
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
         with:
-          ndk-version: r27c
+          ndk-version: r29
 
       - name: Build LuaJIT shared library variants
         shell: bash
